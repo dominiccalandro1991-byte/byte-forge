@@ -14,13 +14,135 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      engine_runs: {
+        Row: {
+          created_at: string
+          engine_id: string
+          id: string
+          prompt: string
+          result: string | null
+          tokens_spent: number
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          engine_id: string
+          id?: string
+          prompt: string
+          result?: string | null
+          tokens_spent?: number
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          engine_id?: string
+          id?: string
+          prompt?: string
+          result?: string | null
+          tokens_spent?: number
+          user_id?: string
+        }
+        Relationships: []
+      }
+      orders: {
+        Row: {
+          amount_cents: number
+          created_at: string
+          id: string
+          pack_id: string
+          provider_ref: string | null
+          status: string
+          tokens: number
+          user_id: string
+        }
+        Insert: {
+          amount_cents: number
+          created_at?: string
+          id?: string
+          pack_id: string
+          provider_ref?: string | null
+          status?: string
+          tokens: number
+          user_id: string
+        }
+        Update: {
+          amount_cents?: number
+          created_at?: string
+          id?: string
+          pack_id?: string
+          provider_ref?: string | null
+          status?: string
+          tokens?: number
+          user_id?: string
+        }
+        Relationships: []
+      }
+      token_balances: {
+        Row: {
+          balance: number
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          balance?: number
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          balance?: number
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      token_transactions: {
+        Row: {
+          amount: number
+          created_at: string
+          engine_id: string | null
+          id: string
+          kind: string
+          note: string | null
+          user_id: string
+        }
+        Insert: {
+          amount: number
+          created_at?: string
+          engine_id?: string | null
+          id?: string
+          kind: string
+          note?: string | null
+          user_id: string
+        }
+        Update: {
+          amount?: number
+          created_at?: string
+          engine_id?: string | null
+          id?: string
+          kind?: string
+          note?: string | null
+          user_id?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      grant_tokens: {
+        Args: {
+          _amount: number
+          _kind: string
+          _note?: string
+          _user_id: string
+        }
+        Returns: number
+      }
+      spend_tokens: {
+        Args: { _amount: number; _engine_id: string; _user_id: string }
+        Returns: number
+      }
     }
     Enums: {
       [_ in never]: never
