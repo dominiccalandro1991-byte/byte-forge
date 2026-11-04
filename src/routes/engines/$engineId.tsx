@@ -57,8 +57,8 @@ function EnginePage() {
     setResult(null);
     try {
       const res = await run({ data: { engineId: engine!.id, prompt } });
-      setResult(res.result);
-      setBalance(res.balance);
+      setResult(JSON.stringify((res as any).result.output, null, 2));
+      setBalance((res as any).balance);
       toast.success(`${engine!.name} fired. ${engine!.tokenCost} tokens spent.`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Engine run failed";
