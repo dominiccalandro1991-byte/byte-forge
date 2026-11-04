@@ -100,7 +100,7 @@ export const runEngine = createServerFn({ method: "POST" })
     const engine = ENGINE_MAP.get(data.engineId);
     if (!engine || (engine.mode !== "server" && engine.mode !== "ai")) throw new Error("Unknown engine");
     const balance = await spend(context, engine.id, engine.tokenCost);
-    let result: { status: string; summary: string; output: unknown };
+    let result: { status: string; summary: string; output: any };
     try {
       if (engine.id === "prior-art-validator") {
         const hash = await sha256(data.prompt);
@@ -131,7 +131,7 @@ export const runEngine = createServerFn({ method: "POST" })
         const { generateResponse } = await import("@lovable.dev/ai-gateway");
         const res = await generateResponse({
           model: "openai/gpt-6-astra",
-          instructions: AI_PROMPTS[engine.id],
+          instructions: AI_PROMPTS[engine.id] ?? null,
           input: data.prompt,
         });
         const text = ((res as any).output ?? [])
@@ -146,7 +146,7 @@ export const runEngine = createServerFn({ method: "POST" })
       throw err;
     }
     await record(context, engine.id, data.prompt, result, engine.tokenCost);
-    return { result, balance: balance };
+    return { result: JSON.parse(JSON.stringify(result)) as { status: string; summary: string; output: Record<string, string> }, balance };
   });
 
 export const purchasePack = createServerFn({ method: "POST" })
