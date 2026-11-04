@@ -3,55 +3,57 @@ import { z } from "zod";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { ENGINE_MAP, TOKEN_PACKS } from "./engines";
 
-const SYSTEM_PROMPTS: Record<string, string> = {
-  oracle:
-    "You are Oracle, a frontier conversational intelligence. Give sharp, honest, deeply-reasoned answers. Be direct, structured, and genuinely useful. No filler.",
-  distill:
-    "You are Distill, a summarization engine. Extract the signal from any document: key points, decisions, and action items. Use tight bullet structure. Never pad.",
-  forge:
-    "You are Forge, a code generation engine. Return clean, commented, production-grade code in the most appropriate language. Brief explanation first, then the code block.",
-  wordsmith:
-    "You are Wordsmith, a conversion copywriting engine. Write persuasive, vivid copy matched to the requested format and audience. Offer 2-3 variations when useful.",
-  insight:
-    "You are Insight, a data analysis engine. Find patterns, outliers, trends, and the story behind the numbers. Present findings clearly with concrete takeaways.",
-  babel:
-    "You are Babel, a localization engine. Translate with native fluency, preserving tone, idiom, and intent. If the target language is ambiguous, ask or pick the most likely and note it.",
+const AI_PROMPTS: Record<string, string> = {
+  "codegen-orchestrator":
+    "You are CodeGen Orchestrator. Return production-grade, commented code for the request. One short explanation line, then a single fenced code block.",
+  "refactoring-engine":
+    "You are an autonomous refactoring engine. Refactor the user's code for clarity, safety and performance without changing behavior. Return ONLY the refactored code, no fences, no commentary.",
 };
 
-const AI_GATEWAY_URL = "https://ai-gateway.lovable.dev/v1/chat/completions";
-const AI_MODEL = "google/gemini-3-flash-preview";
+type Ctx = { supabase: any; userId: string };
+
+async function spend(ctx: Ctx, engineId: string, cost: number) {
+  const { data, error } = await ctx.supabase.rpc("spend_tokens", {
+    _user_id: ctx.userId,
+    _amount: cost,
+    _engine_id: engineId,
+  });
+  if (error) {
+    if (error.message.includes("insufficient_tokens")) throw new Error("INSUFFICIENT_TOKENS");
+    throw new Error(error.message);
+  }
+  return data as number;
+}
+
+async function refund(ctx: Ctx, name: string, cost: number) {
+  await ctx.supabase.rpc("grant_tokens", {
+    _user_id: ctx.userId,
+    _amount: cost,
+    _kind: "refund",
+    _note: `Refund: ${name} run failed`,
+  });
+}
+
+async function record(ctx: Ctx, engineId: string, input: string, result: unknown, cost: number) {
+  await ctx.supabase.from("engine_runs").insert({
+    user_id: ctx.userId,
+    engine_id: engineId,
+    prompt: input.slice(0, 20000),
+    result: JSON.stringify(result).slice(0, 200000),
+    tokens_spent: cost,
+  });
+}
 
 export const getAccountOverview = createServerFn({ method: "GET" })
   .middleware([requireSupabaseAuth])
   .handler(async ({ context }) => {
     const { supabase, userId } = context;
-
     const [balanceRes, txRes, runsRes, ordersRes] = await Promise.all([
-      supabase
-        .from("token_balances")
-        .select("balance")
-        .eq("user_id", userId)
-        .maybeSingle(),
-      supabase
-        .from("token_transactions")
-        .select("id, amount, kind, engine_id, note, created_at")
-        .eq("user_id", userId)
-        .order("created_at", { ascending: false })
-        .limit(20),
-      supabase
-        .from("engine_runs")
-        .select("id, engine_id, prompt, tokens_spent, created_at")
-        .eq("user_id", userId)
-        .order("created_at", { ascending: false })
-        .limit(10),
-      supabase
-        .from("orders")
-        .select("id, pack_id, tokens, amount_cents, status, created_at")
-        .eq("user_id", userId)
-        .order("created_at", { ascending: false })
-        .limit(10),
+      supabase.from("token_balances").select("balance").eq("user_id", userId).maybeSingle(),
+      supabase.from("token_transactions").select("id, amount, kind, engine_id, note, created_at").eq("user_id", userId).order("created_at", { ascending: false }).limit(20),
+      supabase.from("engine_runs").select("id, engine_id, prompt, tokens_spent, created_at").eq("user_id", userId).order("created_at", { ascending: false }).limit(10),
+      supabase.from("orders").select("id, pack_id, tokens, amount_cents, status, created_at").eq("user_id", userId).order("created_at", { ascending: false }).limit(10),
     ]);
-
     return {
       balance: balanceRes.data?.balance ?? 0,
       transactions: txRes.data ?? [],
@@ -60,86 +62,91 @@ export const getAccountOverview = createServerFn({ method: "GET" })
     };
   });
 
-export const runEngine = createServerFn({ method: "POST" })
+export const getEngineHistory = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .inputValidator((data) =>
-    z
-      .object({
-        engineId: z.string(),
-        prompt: z.string().min(1).max(20000),
-      })
-      .parse(data),
+  .inputValidator((d) => z.object({ engineId: z.string() }).parse(d))
+  .handler(async ({ context, data }) => {
+    const [runs, bal] = await Promise.all([
+      context.supabase.from("engine_runs").select("id, prompt, result, created_at").eq("user_id", context.userId).eq("engine_id", data.engineId).order("created_at", { ascending: false }).limit(10),
+      context.supabase.from("token_balances").select("balance").eq("user_id", context.userId).maybeSingle(),
+    ]);
+    return { runs: runs.data ?? [], balance: bal.data?.balance ?? 0 };
+  });
+
+/** Charge and save a run whose computation happened in the user's browser. */
+export const recordClientRun = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((d) =>
+    z.object({ engineId: z.string(), input: z.string().max(200000), result: z.unknown() }).parse(d),
   )
   .handler(async ({ context, data }) => {
-    const { supabase, userId } = context;
-    const engine = ENGINE_MAP.get(data.engineId as never);
-    if (!engine) throw new Error("Unknown engine");
+    const engine = ENGINE_MAP.get(data.engineId);
+    if (!engine || engine.mode !== "client") throw new Error("Unknown engine");
+    const balance = await spend(context, engine.id, engine.tokenCost);
+    await record(context, engine.id, data.input, data.result, engine.tokenCost);
+    return { balance };
+  });
 
-    // Atomically spend tokens — raises 'insufficient_tokens' when too low.
-    const { data: newBalance, error: spendError } = await supabase.rpc(
-      "spend_tokens",
-      {
-        _user_id: userId,
-        _amount: engine.tokenCost,
-        _engine_id: engine.id,
-      },
-    );
-    if (spendError) {
-      if (spendError.message.includes("insufficient_tokens")) {
-        throw new Error("INSUFFICIENT_TOKENS");
-      }
-      throw new Error(spendError.message);
-    }
+async function sha256(text: string) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
 
-    const apiKey = process.env["LOVABLE_API_KEY"];
-    if (!apiKey) throw new Error("AI gateway is not configured");
-
-    let resultText: string;
+/** Server / AI engines: computation runs here. */
+export const runEngine = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((d) => z.object({ engineId: z.string(), prompt: z.string().min(1).max(100000) }).parse(d))
+  .handler(async ({ context, data }) => {
+    const engine = ENGINE_MAP.get(data.engineId);
+    if (!engine || (engine.mode !== "server" && engine.mode !== "ai")) throw new Error("Unknown engine");
+    const balance = await spend(context, engine.id, engine.tokenCost);
+    let result: { status: string; summary: string; output: unknown };
     try {
-      const response = await fetch(AI_GATEWAY_URL, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: AI_MODEL,
-          messages: [
-            { role: "system", content: SYSTEM_PROMPTS[engine.id] },
-            { role: "user", content: data.prompt },
-          ],
-        }),
-      });
-
-      if (!response.ok) {
-        const errorBody = await response.text();
-        console.error(`AI gateway failed [${response.status}]: ${errorBody}`);
-        throw new Error(`AI request failed [${response.status}]`);
+      if (engine.id === "prior-art-validator") {
+        const hash = await sha256(data.prompt);
+        const { data: prev } = await context.supabase.from("engine_runs").select("result, created_at").eq("user_id", context.userId).eq("engine_id", engine.id);
+        const matches = (prev ?? []).filter((r: any) => {
+          try { return JSON.parse(r.result).output.sha256 === hash; } catch { return false; }
+        });
+        result = {
+          status: matches.length ? "fail" : "pass",
+          summary: matches.length ? `Match: identical to ${matches.length} stored baseline(s).` : `No match among ${(prev ?? []).length} stored baselines. Stored as new baseline.`,
+          output: { sha256: hash, bytes: new TextEncoder().encode(data.prompt).length, matchedAt: matches.map((m: any) => m.created_at) },
+        };
+      } else if (engine.id === "edge-latency-matrix") {
+        const urls = data.prompt.split(/\s+/).filter(Boolean).slice(0, 10);
+        const rows = [];
+        for (const u of urls) {
+          try { new URL(u); } catch { rows.push({ url: u, error: "invalid URL" }); continue; }
+          const times: number[] = []; let status = 0;
+          for (let i = 0; i < 3; i++) {
+            const t = Date.now();
+            try { const res = await fetch(u, { method: "GET", redirect: "follow" }); status = res.status; await res.body?.cancel(); } catch { status = -1; }
+            times.push(Date.now() - t);
+          }
+          rows.push({ url: u, status, minMs: Math.min(...times), avgMs: Math.round(times.reduce((a, b) => a + b, 0) / 3), maxMs: Math.max(...times) });
+        }
+        result = { status: "info", summary: `Probed ${rows.length} URL(s), 3 requests each.`, output: rows };
+      } else {
+        const { generateResponse } = await import("@lovable.dev/ai-gateway");
+        const res = await generateResponse({
+          model: "openai/gpt-6-astra",
+          instructions: AI_PROMPTS[engine.id],
+          input: data.prompt,
+        });
+        const text = ((res as any).output ?? [])
+          .flatMap((o: any) => (o.type === "message" ? o.content : []))
+          .filter((c: any) => c.type === "output_text")
+          .map((c: any) => c.text)
+          .join("");
+        result = { status: "info", summary: "Generated by AI.", output: { text } };
       }
-
-      const json = await response.json();
-      resultText =
-        json.choices?.[0]?.message?.content ?? "The engine returned nothing.";
     } catch (err) {
-      // Refund on failure so users never pay for a broken run.
-      await supabase.rpc("grant_tokens", {
-        _user_id: userId,
-        _amount: engine.tokenCost,
-        _kind: "refund",
-        _note: `Refund: ${engine.name} run failed`,
-      });
+      await refund(context, engine.name, engine.tokenCost);
       throw err;
     }
-
-    await supabase.from("engine_runs").insert({
-      user_id: userId,
-      engine_id: engine.id,
-      prompt: data.prompt,
-      result: resultText,
-      tokens_spent: engine.tokenCost,
-    });
-
-    return { result: resultText, balance: newBalance as number };
+    await record(context, engine.id, data.prompt, result, engine.tokenCost);
+    return { result, balance: balance };
   });
 
 export const purchasePack = createServerFn({ method: "POST" })
@@ -149,26 +156,13 @@ export const purchasePack = createServerFn({ method: "POST" })
     const { supabase, userId } = context;
     const pack = TOKEN_PACKS.find((p) => p.id === data.packId);
     if (!pack) throw new Error("Unknown token pack");
-
     const { error: orderError } = await supabase.from("orders").insert({
-      user_id: userId,
-      pack_id: pack.id,
-      tokens: pack.tokens,
-      amount_cents: pack.priceCents,
-      status: "completed",
+      user_id: userId, pack_id: pack.id, tokens: pack.tokens, amount_cents: pack.priceCents, status: "completed",
     });
     if (orderError) throw new Error(orderError.message);
-
-    const { data: newBalance, error: grantError } = await supabase.rpc(
-      "grant_tokens",
-      {
-        _user_id: userId,
-        _amount: pack.tokens,
-        _kind: "purchase",
-        _note: `${pack.name} pack (${pack.tokens} tokens)`,
-      },
-    );
+    const { data: newBalance, error: grantError } = await supabase.rpc("grant_tokens", {
+      _user_id: userId, _amount: pack.tokens, _kind: "purchase", _note: `${pack.name} pack (${pack.tokens} tokens)`,
+    });
     if (grantError) throw new Error(grantError.message);
-
     return { balance: newBalance as number, tokens: pack.tokens };
   });
