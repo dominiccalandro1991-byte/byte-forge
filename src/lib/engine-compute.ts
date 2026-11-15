@@ -229,14 +229,18 @@ export function runTests(text: string): Promise<EngineResult> {
   const src = `onmessage=e=>{const{code,cases}=e.data;const res=[];const t0=performance.now();for(const c of cases){const s=performance.now();try{const ok=new Function(code+"\\nreturn ("+c+");")();res.push({test:c,pass:ok===true,detail:ok===true?"ok":"returned "+String(ok),ms:+(performance.now()-s).toFixed(2)})}catch(err){res.push({test:c,pass:false,detail:String(err),ms:+(performance.now()-s).toFixed(2)})}}postMessage({res,ms:+(performance.now()-t0).toFixed(2)})}`;
   return new Promise((resolve) => {
     if (!cases.length) return resolve({ status: "fail", summary: "No tests found after // TESTS", output: {} });
-    const w = new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
-    const timer = setTimeout(() => { w.terminate(); resolve({ status: "fail", summary: "Timed out after 5s", output: {} }); }, 5000);
+    const url = URL.createObjectURL(new Blob([src], { type: "text/javascript" }));
+    const w = new Worker(url);
+    const cleanup = () => { w.terminate(); URL.revokeObjectURL(url); };
+    const timer = setTimeout(() => { cleanup(); resolve({ status: "fail", summary: "Timed out after 5s", output: {} }); }, 5000);
+    w.onerror = () => { clearTimeout(timer); cleanup(); resolve({ status: "fail", summary: "The isolated test worker failed to execute", output: {} }); };
     w.onmessage = (e) => {
-      clearTimeout(timer); w.terminate();
+      clearTimeout(timer); cleanup();
       const { res, ms } = e.data as { res: { pass: boolean }[]; ms: number };
       const p = res.filter((x) => x.pass).length;
       resolve({ status: p === res.length ? "pass" : "fail", summary: `${p} passed, ${res.length - p} failed in ${ms} ms`, output: { passed: p, failed: res.length - p, durationMs: ms, results: res } });
     };
+    w.postMessage({ code, cases });
   });
 }
 
@@ -258,7 +262,12 @@ export function viewport(html: string, p: P): Promise<EngineResult> {
     f.style.cssText = `position:fixed;left:-10000px;top:0;width:${width}px;height:800px;border:0`;
     f.srcdoc = html;
     f.onload = () => {
-      const d = f.contentDocument!;
+      const d = f.contentDocument;
+      if (!d?.body) {
+        f.remove();
+        resolve({ status: "fail", summary: "Unable to measure the supplied HTML", output: {} });
+        return;
+      }
       const sw = d.documentElement.scrollWidth;
       const over = [...d.body.querySelectorAll("*")].map((el) => { const b = el.getBoundingClientRect(); return { tag: el.tagName.toLowerCase(), cls: (el as HTMLElement).className || "", right: Math.round(b.right), width: Math.round(b.width) }; }).filter((x) => x.right > width).slice(0, 50);
       const height = d.documentElement.scrollHeight;

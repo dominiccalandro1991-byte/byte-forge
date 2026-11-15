@@ -87,14 +87,14 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
         {
           name: "description",
           content:
-            "Six specialized AI engines. One token economy. Buy tokens, fire any engine, get results instantly.",
+            "25 independent diagnostic engines for research, engineering, code, deployment and reliability.",
         },
         { name: "author", content: "EngineCore" },
         { property: "og:title", content: "EngineCore — The AI Engine Marketplace" },
         {
           property: "og:description",
           content:
-            "Six specialized AI engines. One token economy. Buy tokens, fire any engine, get results instantly.",
+            "25 independent diagnostic engines for research, engineering, code, deployment and reliability.",
         },
         { property: "og:type", content: "website" },
         { name: "twitter:card", content: "summary_large_image" },

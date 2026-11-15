@@ -35,13 +35,17 @@ async function refund(ctx: Ctx, name: string, cost: number) {
 }
 
 async function record(ctx: Ctx, engineId: string, input: string, result: unknown, cost: number) {
-  await ctx.supabase.from("engine_runs").insert({
+  const encoded = JSON.stringify(result);
+  if (encoded.length > 200000)
+    throw new Error("Result exceeds the storage limit. Reduce the input and try again.");
+  const { error } = await ctx.supabase.from("engine_runs").insert({
     user_id: ctx.userId,
     engine_id: engineId,
-    prompt: input.slice(0, 20000),
-    result: JSON.stringify(result).slice(0, 200000),
+    prompt: input,
+    result: encoded,
     tokens_spent: cost,
   });
+  if (error) throw new Error("The result could not be saved.");
 }
 
 export const getAccountOverview = createServerFn({ method: "GET" })
@@ -50,9 +54,24 @@ export const getAccountOverview = createServerFn({ method: "GET" })
     const { supabase, userId } = context;
     const [balanceRes, txRes, runsRes, ordersRes] = await Promise.all([
       supabase.from("token_balances").select("balance").eq("user_id", userId).maybeSingle(),
-      supabase.from("token_transactions").select("id, amount, kind, engine_id, note, created_at").eq("user_id", userId).order("created_at", { ascending: false }).limit(20),
-      supabase.from("engine_runs").select("id, engine_id, prompt, tokens_spent, created_at").eq("user_id", userId).order("created_at", { ascending: false }).limit(10),
-      supabase.from("orders").select("id, pack_id, tokens, amount_cents, status, created_at").eq("user_id", userId).order("created_at", { ascending: false }).limit(10),
+      supabase
+        .from("token_transactions")
+        .select("id, amount, kind, engine_id, note, created_at")
+        .eq("user_id", userId)
+        .order("created_at", { ascending: false })
+        .limit(20),
+      supabase
+        .from("engine_runs")
+        .select("id, engine_id, prompt, tokens_spent, created_at")
+        .eq("user_id", userId)
+        .order("created_at", { ascending: false })
+        .limit(10),
+      supabase
+        .from("orders")
+        .select("id, pack_id, tokens, amount_cents, status, created_at")
+        .eq("user_id", userId)
+        .order("created_at", { ascending: false })
+        .limit(10),
     ]);
     return {
       balance: balanceRes.data?.balance ?? 0,
@@ -67,8 +86,18 @@ export const getEngineHistory = createServerFn({ method: "POST" })
   .inputValidator((d) => z.object({ engineId: z.string() }).parse(d))
   .handler(async ({ context, data }) => {
     const [runs, bal] = await Promise.all([
-      context.supabase.from("engine_runs").select("id, prompt, result, created_at").eq("user_id", context.userId).eq("engine_id", data.engineId).order("created_at", { ascending: false }).limit(10),
-      context.supabase.from("token_balances").select("balance").eq("user_id", context.userId).maybeSingle(),
+      context.supabase
+        .from("engine_runs")
+        .select("id, prompt, result, created_at")
+        .eq("user_id", context.userId)
+        .eq("engine_id", data.engineId)
+        .order("created_at", { ascending: false })
+        .limit(10),
+      context.supabase
+        .from("token_balances")
+        .select("balance")
+        .eq("user_id", context.userId)
+        .maybeSingle(),
     ]);
     return { runs: runs.data ?? [], balance: bal.data?.balance ?? 0 };
   });
@@ -83,7 +112,12 @@ export const recordClientRun = createServerFn({ method: "POST" })
     const engine = ENGINE_MAP.get(data.engineId);
     if (!engine || engine.mode !== "client") throw new Error("Unknown engine");
     const balance = await spend(context, engine.id, engine.tokenCost);
-    await record(context, engine.id, data.input, data.result, engine.tokenCost);
+    try {
+      await record(context, engine.id, data.input, data.result, engine.tokenCost);
+    } catch (error) {
+      await refund(context, engine.name, engine.tokenCost);
+      throw error;
+    }
     return { balance };
   });
 
@@ -95,38 +129,77 @@ async function sha256(text: string) {
 /** Server / AI engines: computation runs here. */
 export const runEngine = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .inputValidator((d) => z.object({ engineId: z.string(), prompt: z.string().min(1).max(100000) }).parse(d))
+  .inputValidator((d) =>
+    z.object({ engineId: z.string(), prompt: z.string().min(1).max(100000) }).parse(d),
+  )
   .handler(async ({ context, data }) => {
     const engine = ENGINE_MAP.get(data.engineId);
-    if (!engine || (engine.mode !== "server" && engine.mode !== "ai")) throw new Error("Unknown engine");
+    if (!engine || (engine.mode !== "server" && engine.mode !== "ai"))
+      throw new Error("Unknown engine");
     const balance = await spend(context, engine.id, engine.tokenCost);
     let result: { status: string; summary: string; output: any };
     try {
       if (engine.id === "prior-art-validator") {
         const hash = await sha256(data.prompt);
-        const { data: prev } = await context.supabase.from("engine_runs").select("result, created_at").eq("user_id", context.userId).eq("engine_id", engine.id);
+        const { data: prev } = await context.supabase
+          .from("engine_runs")
+          .select("result, created_at")
+          .eq("user_id", context.userId)
+          .eq("engine_id", engine.id);
         const matches = (prev ?? []).filter((r: any) => {
-          try { return JSON.parse(r.result).output.sha256 === hash; } catch { return false; }
+          try {
+            return JSON.parse(r.result).output.sha256 === hash;
+          } catch {
+            return false;
+          }
         });
         result = {
           status: matches.length ? "fail" : "pass",
-          summary: matches.length ? `Match: identical to ${matches.length} stored baseline(s).` : `No match among ${(prev ?? []).length} stored baselines. Stored as new baseline.`,
-          output: { sha256: hash, bytes: new TextEncoder().encode(data.prompt).length, matchedAt: matches.map((m: any) => m.created_at) },
+          summary: matches.length
+            ? `Match: identical to ${matches.length} stored baseline(s).`
+            : `No match among ${(prev ?? []).length} stored baselines. Stored as new baseline.`,
+          output: {
+            sha256: hash,
+            bytes: new TextEncoder().encode(data.prompt).length,
+            matchedAt: matches.map((m: any) => m.created_at),
+          },
         };
       } else if (engine.id === "edge-latency-matrix") {
         const urls = data.prompt.split(/\s+/).filter(Boolean).slice(0, 10);
         const rows = [];
         for (const u of urls) {
-          try { new URL(u); } catch { rows.push({ url: u, error: "invalid URL" }); continue; }
-          const times: number[] = []; let status = 0;
+          try {
+            new URL(u);
+          } catch {
+            rows.push({ url: u, error: "invalid URL" });
+            continue;
+          }
+          const times: number[] = [];
+          let status = 0;
           for (let i = 0; i < 3; i++) {
             const t = Date.now();
-            try { const res = await fetch(u, { method: "GET", redirect: "follow" }); status = res.status; await res.body?.cancel(); } catch { status = -1; }
+            try {
+              const res = await fetch(u, { method: "GET", redirect: "follow" });
+              status = res.status;
+              await res.body?.cancel();
+            } catch {
+              status = -1;
+            }
             times.push(Date.now() - t);
           }
-          rows.push({ url: u, status, minMs: Math.min(...times), avgMs: Math.round(times.reduce((a, b) => a + b, 0) / 3), maxMs: Math.max(...times) });
+          rows.push({
+            url: u,
+            status,
+            minMs: Math.min(...times),
+            avgMs: Math.round(times.reduce((a, b) => a + b, 0) / 3),
+            maxMs: Math.max(...times),
+          });
         }
-        result = { status: "info", summary: `Probed ${rows.length} URL(s), 3 requests each.`, output: rows };
+        result = {
+          status: "info",
+          summary: `Probed ${rows.length} URL(s), 3 requests each.`,
+          output: rows,
+        };
       } else {
         const { generateResponse } = await import("@lovable.dev/ai-gateway");
         const res = await generateResponse({
@@ -141,12 +214,19 @@ export const runEngine = createServerFn({ method: "POST" })
           .join("");
         result = { status: "info", summary: "Generated by AI.", output: { text } };
       }
+      await record(context, engine.id, data.prompt, result, engine.tokenCost);
     } catch (err) {
       await refund(context, engine.name, engine.tokenCost);
       throw err;
     }
-    await record(context, engine.id, data.prompt, result, engine.tokenCost);
-    return { result: JSON.parse(JSON.stringify(result)) as { status: string; summary: string; output: Record<string, string> }, balance };
+    return {
+      result: JSON.parse(JSON.stringify(result)) as {
+        status: string;
+        summary: string;
+        output: Record<string, string>;
+      },
+      balance,
+    };
   });
 
 export const purchasePack = createServerFn({ method: "POST" })
@@ -157,11 +237,18 @@ export const purchasePack = createServerFn({ method: "POST" })
     const pack = TOKEN_PACKS.find((p) => p.id === data.packId);
     if (!pack) throw new Error("Unknown token pack");
     const { error: orderError } = await supabase.from("orders").insert({
-      user_id: userId, pack_id: pack.id, tokens: pack.tokens, amount_cents: pack.priceCents, status: "completed",
+      user_id: userId,
+      pack_id: pack.id,
+      tokens: pack.tokens,
+      amount_cents: pack.priceCents,
+      status: "completed",
     });
     if (orderError) throw new Error(orderError.message);
     const { data: newBalance, error: grantError } = await supabase.rpc("grant_tokens", {
-      _user_id: userId, _amount: pack.tokens, _kind: "purchase", _note: `${pack.name} pack (${pack.tokens} tokens)`,
+      _user_id: userId,
+      _amount: pack.tokens,
+      _kind: "purchase",
+      _note: `${pack.name} pack (${pack.tokens} tokens)`,
     });
     if (grantError) throw new Error(grantError.message);
     return { balance: newBalance as number, tokens: pack.tokens };

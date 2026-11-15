@@ -19,13 +19,13 @@ export const Route = createFileRoute("/")({
       {
         name: "description",
         content:
-          "Six specialized AI engines. One token economy. Buy tokens, fire any engine, get results instantly.",
+          "25 independent diagnostic engines for research, engineering, code, deployment and reliability.",
       },
       { property: "og:title", content: "EngineCore — The AI Engine Marketplace" },
       {
         property: "og:description",
         content:
-          "Six specialized AI engines. One token economy. Buy tokens, fire any engine, get results instantly.",
+          "25 independent diagnostic engines for research, engineering, code, deployment and reliability.",
       },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
@@ -89,7 +89,7 @@ function Landing() {
         />
         <div className="mx-auto mb-6 inline-flex items-center gap-2 rounded-full border border-neon/30 bg-neon/5 px-4 py-1.5 text-xs font-medium text-neon">
           <Zap className="h-3.5 w-3.5" />
-          Six engines. One token economy.
+          25 engines. Independent workflows.
         </div>
         <h1 className="font-display mx-auto max-w-3xl text-5xl font-bold leading-[1.05] tracking-tight md:text-7xl">
           Fire any engine.{" "}

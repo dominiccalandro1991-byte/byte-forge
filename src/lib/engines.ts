@@ -64,7 +64,7 @@ const DEFS: Def[] = [
 
 export const ENGINES: Engine[] = DEFS.map(({ slug, ...d }, i) => {
   const b = Math.floor(i / 5);
-  return { ...d, id: slug, phi: i + 1, batch: B[b]!, icon: ICON[b]!, accent: ACC[b]! };
+  return { ...d, id: slug, phi: i + 1, batch: B[b] ?? "Reliability", icon: ICON[b] ?? "sparkles", accent: ACC[b] ?? "neon" };
 });
 
 export const ENGINE_MAP = new Map(ENGINES.map((e) => [e.id, e]));
